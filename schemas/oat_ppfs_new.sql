@@ -11,7 +11,7 @@
  Target Server Version : 80403 (8.4.3)
  File Encoding         : 65001
 
- Date: 16/03/2026 10:15:02
+ Date: 16/03/2026 15:03:15
 */
 
 SET NAMES utf8mb4;
@@ -732,6 +732,24 @@ INSERT INTO `sys_audit_logs` VALUES (6, 'INSERT', 'trn_budget_allocation', '0df6
 INSERT INTO `sys_audit_logs` VALUES (7, 'UPDATE', 'sys_users', '1', NULL, '{\"ip\": \"::1\", \"action\": \"login_success\"}', 1, '2026-03-16 09:31:21');
 INSERT INTO `sys_audit_logs` VALUES (8, 'UPDATE', 'trn_hdc_targets', '35a41e41-861a-483b-a384-89abfd371792', '{\"data\": [{\"batch_id\": \"4d1d33b2-28f6-4850-bb71-b1b496f1a3d5\", \"row_count\": 1, \"fiscal_year\": 2568}, {\"batch_id\": \"4d1d33b2-28f6-4850-bb71-b1b496f1a3d5\", \"row_count\": 4, \"fiscal_year\": 2569}], \"desc\": \"ข้อมูลเดิม\"}', '{\"data\": [{\"row_count\": 1, \"fiscal_year\": 2568}, {\"row_count\": 4, \"fiscal_year\": 2569}], \"desc\": \"ข้อมูลใหม่\"}', 1, '2026-03-16 09:32:26');
 INSERT INTO `sys_audit_logs` VALUES (9, 'UPDATE', 'sys_users', '1', NULL, '{\"ip\": \"::1\", \"action\": \"login_success\"}', 1, '2026-03-16 10:05:44');
+
+-- ----------------------------
+-- Table structure for sys_locks
+-- ----------------------------
+DROP TABLE IF EXISTS `sys_locks`;
+CREATE TABLE `sys_locks`  (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `scope_key` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `is_locked` tinyint(1) NULL DEFAULT 0,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `scope_key`(`scope_key` ASC) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 2 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Records of sys_locks
+-- ----------------------------
+INSERT INTO `sys_locks` VALUES (1, 'sys_cascade_recalc', 0, '2026-03-16 11:03:55');
 
 -- ----------------------------
 -- Table structure for sys_upload_locks
