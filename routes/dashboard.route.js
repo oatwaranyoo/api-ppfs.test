@@ -1,9 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const { getSummary } = require('../controllers/dashboard.controller');
-const { verifyToken } = require('../middlewares/auth.middleware'); // นำเข้า middleware ตรวจสอบ Token ของคุณ
+// ไม่ต้องใช้ verifyToken แล้วสำหรับหน้านี้
+// const { verifyToken } = require('../middlewares/auth.middleware'); 
 
 // GET /api/dashboard/summary
-router.get('/summary', verifyToken, getSummary);
+// ลบ verifyToken ออกเพื่อให้เข้าถึงข้อมูลสรุปได้โดยไม่ต้อง Login
+router.get('/summary', getSummary);
 
 module.exports = router;
