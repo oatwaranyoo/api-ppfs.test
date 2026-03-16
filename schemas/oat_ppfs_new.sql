@@ -11,7 +11,7 @@
  Target Server Version : 80403 (8.4.3)
  File Encoding         : 65001
 
- Date: 16/03/2026 16:02:17
+ Date: 16/03/2026 23:04:54
 */
 
 SET NAMES utf8mb4;
@@ -766,6 +766,7 @@ CREATE TABLE `sys_upload_locks`  (
 -- ----------------------------
 -- Records of sys_upload_locks
 -- ----------------------------
+INSERT INTO `sys_upload_locks` VALUES ('hdc_target_data', '7c830d9f-e7fe-4ce9-a3f1-e712e9609a02', '2026-03-16 22:58:22', 1);
 
 -- ----------------------------
 -- Table structure for sys_users
