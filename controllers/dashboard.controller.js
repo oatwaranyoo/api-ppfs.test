@@ -1,65 +1,62 @@
 const db = require('../config/db');
 
 const getSummary = async (req, res) => {
+    // [SRS MUST] ดึง Connection เดี่ยวออกมาจาก Pool เพื่อกำหนดระดับ Isolation ของ Session นี้เท่านั้น
+    const connection = await db.getConnection();
+    
     try {
-        // ----------------------------------------------------------------
-        // [SRS MUST] DB Lock Prevention
-        // อ่านข้อมูลโดยไม่รอ Lock ป้องกัน Query ค้างเมื่อมีคนอัปโหลดไฟล์ขนาดใหญ่
-        // ----------------------------------------------------------------
-        await db.execute(`SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;`);
+        // [SRS MUST] DB Lock Prevention (Dirty Read อนุญาตสำหรับ Dashboard)
+        await connection.query(`SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;`);
 
-        // ----------------------------------------------------------------
         // [SRS Critical] Dashboard Maintenance Sync Guard
-        // ตรวจสอบว่าระบบกำลังประมวลผลย้อนหลังอยู่หรือไม่ (ตรวจสอบจากตารางระบบ)
-        // ----------------------------------------------------------------
         let isRecalculating = false;
         try {
-            // หมายเหตุ: ปรับชื่อตารางและฟิลด์ให้ตรงกับ DB ของคุณ (สมมติใช้ชื่อตาราง sys_locks)
-            const [[lockStatus]] = await db.execute(`
+            const [locks] = await connection.query(`
                 SELECT 1 
-                FROM sys_locks 
-                WHERE scope_key = 'sys_cascade_recalc' AND is_locked = 1 
+                FROM sys_upload_locks 
+                WHERE scope_key = 'sys_cascade_recalc' 
                 LIMIT 1
             `);
-            if (lockStatus) {
+            if (locks.length > 0) {
                 isRecalculating = true;
             }
         } catch (err) {
-            // ดัก Error ไว้กรณีที่ตารางนี้ยังไม่ได้ถูกสร้างใน DB ระบบจะได้ไม่พัง แต่ให้ข้ามการเช็คไปก่อน
-            console.warn("Maintenance Sync Guard check skipped (table might not exist yet).");
+            console.warn("Maintenance Sync Guard check skipped:", err.message);
         }
 
-        // 1. ดึงสรุปยอดรวม สปสช. (จำนวนบรรทัด และ จำนวนเงินรวม)
-        // [SRS Critical] เพิ่มเงื่อนไข WHERE is_valid = 1 เสมอ
-        const [[nhsoSummary]] = await db.execute(`
-            SELECT COUNT(id) as total_rows, SUM(amount) as total_money 
-            FROM trn_data_nhso
+        // 1. ดึงสรุปยอดรวม สปสช. 
+        const [nhsoRows] = await connection.query(`
+            SELECT COUNT(*) as total_rows, SUM(allocated_budget) as total_money 
+            FROM trn_budget_allocation
             WHERE is_valid = 1
         `);
+        const nhsoSummary = nhsoRows[0];
 
-        // 2. ดึง 5 อันดับ 'กิจกรรมหลัก' ที่ทำเงินสูงสุด (สำหรับทำกราฟ)
-        // [SRS Critical] เพิ่มเงื่อนไข AND is_valid = 1
-        const [chartData] = await db.execute(`
-            SELECT main_activity as name, SUM(amount) as y 
-            FROM trn_data_nhso 
-            WHERE main_activity IS NOT NULL 
-              AND main_activity != ''
-              AND is_valid = 1
-            GROUP BY main_activity 
+        // 2. ดึง 5 อันดับ 'กิจกรรมหลัก'
+        const [chartData] = await connection.query(`
+            SELECT 
+                m.main_activity_name as name, 
+                SUM(t.allocated_budget) as y 
+            FROM trn_budget_allocation t
+            LEFT JOIN mst_sub_activities s ON t.sub_activity_id = s.sub_activity_id AND t.fiscal_year = s.fiscal_year
+            LEFT JOIN mst_main_activities m ON s.main_activity_id = m.main_activity_id AND s.fiscal_year = m.fiscal_year
+            WHERE t.is_valid = 1 
+              AND m.main_activity_name IS NOT NULL
+            GROUP BY m.main_activity_name 
             ORDER BY y DESC 
             LIMIT 5
         `);
 
-        // 3. ดึงจำนวน User ที่เปิดใช้งานอยู่
-        const [[usersSummary]] = await db.execute(`
+        // 3. ดึงจำนวน User ที่เปิดใช้งานอยู่ (แก้ไขตรงนี้: ใช้ status = 'active' แทน is_active)
+        const [usersRows] = await connection.query(`
             SELECT COUNT(id) as total_users 
             FROM sys_users 
-            WHERE is_active = 1
+            WHERE status = 'active'
         `);
+        const usersSummary = usersRows[0];
 
         res.status(200).json({
             status: 'success',
-            // ส่ง Flag แจ้งเตือนกลับไปให้ Frontend
             is_recalculating: isRecalculating,
             data: {
                 nhso_total_rows: parseInt(nhsoSummary.total_rows || 0),
@@ -67,13 +64,17 @@ const getSummary = async (req, res) => {
                 total_users: parseInt(usersSummary.total_users || 0),
                 chart_data: chartData.map(item => ({
                     name: item.name,
-                    y: parseFloat(item.y)
+                    y: parseFloat(item.y || 0)
                 }))
             }
         });
     } catch (error) {
         console.error("Dashboard Summary Error:", error);
         res.status(500).json({ error: error.message });
+    } finally {
+        // [Critical] คืนค่าระดับ Isolation กลับเป็นปกติก่อนคืน Connection กลับเข้า Pool
+        await connection.query(`SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;`);
+        connection.release();
     }
 };
 
