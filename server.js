@@ -29,6 +29,8 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 const authRoutes = require('./routes/auth.routes');
 const uploadRoutes = require('./routes/upload.routes');
 const logRoutes = require('./routes/log.routes'); // 1. นำเข้าไฟล์ Log Route
+const dashboardRoutes = require('./routes/dashboard.route');
+const nhsoRoutes = require('./routes/nhso.route');
 
 // -------------------------------------------------------------------
 // API Routes Registration
@@ -36,6 +38,8 @@ const logRoutes = require('./routes/log.routes'); // 1. นำเข้าไฟ
 app.use('/api/auth', authRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/logs', logRoutes); // 2. ลงทะเบียนใช้งานเส้นทาง /api/logs
+app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/nhso', nhsoRoutes);
 
 app.get('/health', (req, res) => {
     res.status(200).json({ status: 'OK', message: 'PPFS Backend API is running' });
