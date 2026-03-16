@@ -1,30 +1,39 @@
 const express = require('express');
 const router = express.Router();
-const { 
-    initUpload,
-    uploadNhsoChunk, 
-    finalizeNhso,
-    unlockUpload,
-    // HDC คงไว้เหมือนเดิมก่อน
-    uploadHdcTarget, 
-    uploadHdcResult, 
-    finalizeHdc
-} = require('../controllers/upload.controller');
+
+// นำเข้า Middleware สำหรับเช็คสิทธิ์การเข้าถึง
 const { verifyToken } = require('../middlewares/auth.middleware');
 
-// ==========================================
-// [SRS] ระบบ Upload แบบ Batch & Chunking
-// ==========================================
-router.post('/init', verifyToken, initUpload); // ขอ Batch ID และ Lock ระบบ
-router.post('/unlock', verifyToken, unlockUpload); // ปลด Lock กรณีเกิด Error หรือผู้ใช้ปิดแท็บ
+// นำเข้าฟังก์ชันทั้งหมดจาก Controller
+const { 
+    initUpload, 
+    unlockUpload, 
+    forceUnlock,
+    uploadNhsoChunk, 
+    finalizeNhso, 
+    uploadHdcTargetChunk,
+    uploadHdcResultChunk,
+    finalizeHdc
+} = require('../controllers/upload.controller');
 
-// NHSO (สปสช.) Routes
-router.post('/nhso-chunk', verifyToken, uploadNhsoChunk); // ส่งข้อมูลทีละ Chunk
-router.post('/finalize', verifyToken, finalizeNhso); // สลับข้อมูล Zero-Downtime และปลด Lock
+// ==========================================
+// Routes สำหรับการล็อค/ปลดล็อคระบบ
+// ==========================================
+router.post('/init', verifyToken, initUpload);
+router.post('/unlock', verifyToken, unlockUpload);
+router.post('/force-unlock', verifyToken, forceUnlock);
 
-// HDC Routes (รออัปเกรดใน Phase ถัดไป)
-router.post('/hdc-target', verifyToken, uploadHdcTarget);
-router.post('/hdc-result', verifyToken, uploadHdcResult);
-router.post('/hdc-finalize', verifyToken, finalizeHdc);
+// ==========================================
+// Routes สำหรับรับข้อมูล สปสช. (NHSO)
+// ==========================================
+router.post('/nhso-chunk', verifyToken, uploadNhsoChunk);
+router.post('/finalize-nhso', verifyToken, finalizeNhso);
+
+// ==========================================
+// Routes สำหรับรับข้อมูล HDC
+// ==========================================
+router.post('/hdc-target-chunk', verifyToken, uploadHdcTargetChunk);
+router.post('/hdc-result-chunk', verifyToken, uploadHdcResultChunk);
+router.post('/finalize-hdc', verifyToken, finalizeHdc);
 
 module.exports = router;

@@ -51,6 +51,8 @@ const uploadRoutes = require('./routes/upload.routes');
 const logRoutes = require('./routes/log.routes');
 const dashboardRoutes = require('./routes/dashboard.route');
 const nhsoRoutes = require('./routes/nhso.route');
+const userRoutes = require('./routes/user.routes');
+const departmentRoutes = require('./routes/department.routes');
 
 // -------------------------------------------------------------------
 // API Routes Registration
@@ -60,6 +62,8 @@ app.use('/api/upload', uploadRoutes);
 app.use('/api/logs', logRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/nhso', nhsoRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api/departments', departmentRoutes);
 
 app.get('/health', (req, res) => {
     res.status(200).json({ status: 'OK', message: 'PPFS Backend API is running' });

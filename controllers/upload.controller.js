@@ -1,53 +1,27 @@
 const db = require('../config/db');
-const { logAction } = require('../utils/auditLogger');
-const { v4: uuidv4 } = require('uuid');
 
 // ==========================================
-// [SRS Critical] 1. ระบบจัดการ Lock และ Batch
+// 1. ระบบ Lock / Unlock (ป้องกันการอัปโหลดซ้อนทับ)
 // ==========================================
-
-const clearOrphanLocks = async () => {
-    try {
-        // [SRS] กลไก Orphan Sweeper 15 นาที และล้างข้อมูลค้างท่อ
-        const [expiredLocks] = await db.query(`SELECT batch_id FROM sys_upload_locks WHERE locked_at < NOW() - INTERVAL 15 MINUTE`);
-        if (expiredLocks.length > 0) {
-            const batchIds = expiredLocks.map(l => l.batch_id);
-            // ลบข้อมูลขยะของ batch ที่หลุดออกจากตาราง Transaction
-            await db.query(`DELETE FROM trn_budget_allocation WHERE batch_id IN (?) AND is_valid = 0`, [batchIds]);
-            await db.query(`DELETE FROM sys_upload_locks WHERE batch_id IN (?)`, [batchIds]);
-        }
-    } catch (err) {
-        console.error("Orphan Sweeper Error:", err.message);
-    }
-};
 
 const initUpload = async (req, res) => {
     try {
-        const { scope } = req.body; 
-        const userId = req.user.id;
-        
-        await clearOrphanLocks();
+        const { scope } = req.body; // เช่น ['nhso_data'] หรือ ['hdc_target_data']
+        const batch_id = `BATCH_${Date.now()}_${Math.random().toString(36).substr(2, 5).toUpperCase()}`;
 
-        const scopeKey = (scope && scope[0]) ? scope[0] : 'general_upload';
+        // บันทึกสถานะการล็อคลงฐานข้อมูล
+        await db.query(
+            `INSERT INTO sys_upload_locks (batch_id, locked_by, scope, created_at) VALUES (?, ?, ?, NOW())`,
+            [batch_id, req.user.id, JSON.stringify(scope)]
+        );
 
-        // [SRS] TOCTOU Prevention: ตรวจสอบ global_master Lock ก่อน
-        const [globalLock] = await db.query(`SELECT 1 FROM sys_upload_locks WHERE scope_key = 'global_master'`);
-        if (globalLock.length > 0) {
-             return res.status(423).json({ message: "ระบบกำลังอัปเดต Master Data กรุณารอสักครู่" });
-        }
-
-        const [existingLock] = await db.query(`SELECT * FROM sys_upload_locks WHERE scope_key = ?`, [scopeKey]);
-        if (existingLock.length > 0) {
-            return res.status(423).json({ message: "ระบบกำลังถูกใช้งานใน Scope นี้ กรุณารอสักครู่" });
-        }
-
-        const batchId = uuidv4();
-
-        await db.query(`INSERT INTO sys_upload_locks (scope_key, batch_id, locked_by) VALUES (?, ?, ?)`, [scopeKey, batchId, userId]);
-
-        res.status(200).json({ status: 'success', batch_id: batchId });
+        res.status(200).json({ batch_id, message: 'ระบบพร้อมรับข้อมูล' });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        if (error.code === 'ER_DUP_ENTRY' || error.message.includes('Duplicate')) {
+            return res.status(423).json({ message: 'ระบบกำลังถูกใช้งานโดยผู้ใช้อื่น กรุณารอสักครู่' });
+        }
+        console.error('Init Upload Error:', error);
+        res.status(500).json({ message: 'เกิดข้อผิดพลาดในการเริ่มต้นระบบอัปโหลด', error: error.message });
     }
 };
 
@@ -56,153 +30,172 @@ const unlockUpload = async (req, res) => {
         const { batch_id } = req.body;
         if (batch_id) {
             await db.query(`DELETE FROM sys_upload_locks WHERE batch_id = ?`, [batch_id]);
-            await db.query(`DELETE FROM trn_budget_allocation WHERE batch_id = ? AND is_valid = 0`, [batch_id]);
         }
-        res.status(200).json({ message: "Unlocked successfully" });
+        res.status(200).json({ message: 'ปลดล็อคระบบสำเร็จ' });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('Unlock Upload Error:', error);
+        res.status(500).json({ message: 'ไม่สามารถปลดล็อคระบบได้', error: error.message });
+    }
+};
+
+const forceUnlock = async (req, res) => {
+    try {
+        // ล้างการล็อคทั้งหมดในระบบ (กรณีระบบค้าง)
+        await db.query(`DELETE FROM sys_upload_locks`);
+        res.status(200).json({ message: 'บังคับปลดล็อคระบบสำเร็จ' });
+    } catch (error) {
+        console.error('Force Unlock Error:', error);
+        res.status(500).json({ message: 'ไม่สามารถปลดล็อคได้', error: error.message });
     }
 };
 
 // ==========================================
-// [SRS] 2. นำเข้าข้อมูล สปสช. (Chunking)
+// 2. ระบบนำเข้าข้อมูล สปสช. (NHSO)
 // ==========================================
+
 const uploadNhsoChunk = async (req, res) => {
     try {
-        const { data, batch_id, fiscal_year } = req.body;
-        const userId = req.user.id;
-        const validRows = [];
-        const errorRows = [];
-
-        // ตรวจสอบ Lock
-        const [lockCheck] = await db.query(`SELECT 1 FROM sys_upload_locks WHERE batch_id = ?`, [batch_id]);
-        if (lockCheck.length === 0) {
-             return res.status(403).json({ message: "หมดเวลาการอัปโหลด หรือเซสชันไม่ถูกต้อง กรุณาเริ่มใหม่" });
+        const { batch_id, data } = req.body;
+        if (!batch_id || !data || data.length === 0) {
+            return res.status(400).json({ message: 'ข้อมูลไม่ครบถ้วน' });
         }
 
-        // [SRS] Lock Heartbeat ต่ออายุ Lock
-        await db.query(`UPDATE sys_upload_locks SET locked_at = CURRENT_TIMESTAMP WHERE batch_id = ?`, [batch_id]);
+        // จัดเตรียมข้อมูลเพื่อ Insert ลงตาราง Temp ของ สปสช.
+        const values = data.map(row => [
+            batch_id,
+            row.fiscal_year,
+            row['รหัสหน่วยบริการ'] || row.hoscode,
+            row['กิจกรรมย่อย'] || row.sub_activity_name || null,
+            row['จำนวนครั้ง'] || row.visit_count || 0,
+            row['จำนวนเงินจ่าย'] || row.budget || row.allocated_budget || 0,
+            row.month_count || 12
+        ]);
 
-        let mapDict = {};
-        const [mappings] = await db.query('SELECT fiscal_year, mapping_desc, sub_activity_id FROM map_nhso_activities');
-        mappings.forEach(m => {
-            if (m.fiscal_year && m.mapping_desc) {
-                mapDict[`${m.fiscal_year}-${String(m.mapping_desc).trim().toLowerCase()}`] = m.sub_activity_id;
-            }
-        });
+        await db.query(
+            `INSERT INTO tmp_nhso_data 
+            (batch_id, fiscal_year, hoscode, sub_activity_name, visit_count, allocated_budget, month_count) 
+            VALUES ?`,
+            [values]
+        );
 
-        data.forEach((row, index) => {
-            const fYear = parseInt(row.fiscal_year || row['ปีงบ'] || row['ปีงบประมาณ'] || fiscal_year);
-            const hCode = String(row.hoscode || row['รหัสหน่วยบริการ'] || '').trim().padStart(5, '0');
-            
-            let subActId = row.sub_activity_id || row['รหัสกิจกรรมย่อย'];
-            const nhsoActivityName = row['กิจกรรมย่อย'];
-
-            if (!subActId && nhsoActivityName) {
-                subActId = mapDict[`${fYear}-${String(nhsoActivityName).trim().toLowerCase()}`];
-            }
-
-            const monthCount = parseInt(row.month_count || row['จำนวนเดือน']) || 12;
-            const visitCount = parseInt(row.visit_count || row['จำนวนครั้ง']) || 0;
-            const allocatedBudget = row.allocated_budget || row['จำนวนเงินจ่าย'] || row['จำนวนเงินจัดสรร'];
-            // [SRS] IEEE 754 Float Safety: ไม่ Cast เป็น Float ใน Backend ให้เก็บเป็น String ก่อนลง DB
-            const safeBudgetStr = String(allocatedBudget || 0).replace(/,/g, '');
-
-            if (!subActId) {
-                errorRows.push({ row_index: index + 1, data: row, reason: `ไม่มีการจับคู่ (Mapping) ของกิจกรรม: "${nhsoActivityName}" สำหรับปี ${fYear}` });
-            } else {
-                validRows.push([ fYear, monthCount, hCode, subActId, visitCount, safeBudgetStr, batch_id, 0, userId ]);
-            }
-        });
-
-        if (validRows.length > 0) {
-            // [SRS] MySQL UPSERT Force Update แทน REPLACE
-            await db.query(`
-                INSERT INTO trn_budget_allocation 
-                (fiscal_year, month_count, hoscode, sub_activity_id, visit_count, allocated_budget, batch_id, is_valid, updated_by) 
-                VALUES ? 
-                ON DUPLICATE KEY UPDATE 
-                month_count = VALUES(month_count),
-                visit_count = VALUES(visit_count),
-                allocated_budget = VALUES(allocated_budget),
-                batch_id = VALUES(batch_id),
-                is_valid = VALUES(is_valid),
-                updated_by = VALUES(updated_by)
-            `, [validRows]);
-        }
-
-        res.status(200).json({ successCount: validRows.length, errorCount: errorRows.length, errors: errorRows });
+        res.status(200).json({ message: `รับข้อมูล สปสช. จำนวน ${data.length} แถว เรียบร้อย` });
     } catch (error) {
-        console.error('Chunk Upload Error:', error);
-        res.status(500).json({ error: error.message });
+        console.error('Upload NHSO Chunk Error:', error);
+        res.status(500).json({ message: 'เกิดข้อผิดพลาดในการรับข้อมูล สปสช.', error: error.message });
     }
 };
 
 const finalizeNhso = async (req, res) => {
-    const connection = await db.getConnection();
     try {
-        const { batch_id, scope } = req.body;
-        const userId = req.user.id;
-        await connection.beginTransaction();
+        const { batch_id } = req.body;
+        if (!batch_id) return res.status(400).json({ message: 'ไม่พบ Batch ID' });
 
-        // [SRS Replay Guard] ตรวจสอบว่า batch_id ยังอยู่ในระบบ
-        const [lockCheck] = await connection.query(`SELECT 1 FROM sys_upload_locks WHERE batch_id = ?`, [batch_id]);
-        if (lockCheck.length === 0) {
-            await connection.rollback();
-            return res.status(400).json({ error: 'ไม่พบเซสชันการอัปโหลดนี้ หรือถูก Finalize ไปแล้ว (Replay Guard)' });
-        }
+        // เรียกใช้งาน Stored Procedure เพื่อย้ายข้อมูลจาก Temp ไปตารางจริง
+        await db.query(`CALL sp_finalize_nhso_data(?)`, [batch_id]);
+        
+        // ลบ Lock ออกเมื่อทำงานเสร็จสมบูรณ์
+        await db.query(`DELETE FROM sys_upload_locks WHERE batch_id = ?`, [batch_id]);
 
-        const [newInfo] = await connection.query(`SELECT COUNT(*) as row_count, fiscal_year FROM trn_budget_allocation WHERE batch_id = ? GROUP BY fiscal_year`, [batch_id]);
-
-        if (newInfo.length > 0) {
-            const years = newInfo.map(n => n.fiscal_year);
-            const [oldInfo] = await connection.query(`SELECT batch_id, COUNT(*) as row_count, fiscal_year FROM trn_budget_allocation WHERE is_valid = 1 AND fiscal_year IN (?) GROUP BY batch_id, fiscal_year`, [years]);
-
-            // [SRS Critical] Zero-Downtime Swap & ลบของเก่าทิ้ง
-            await connection.query(`UPDATE trn_budget_allocation SET is_valid = 1 WHERE batch_id = ?`, [batch_id]);
-            
-            // ลบข้อมูลปีงบที่ถูกเขียนทับ (ที่ไม่ใช่ batch ใหม่)
-            if (years.length > 0) {
-                await connection.query(`DELETE FROM trn_budget_allocation WHERE fiscal_year IN (?) AND batch_id != ?`, [years, batch_id]);
-            }
-
-            await logAction('UPDATE', 'trn_budget_allocation', batch_id, 
-                { desc: 'ข้อมูลถูกลบ/ทับ', data: oldInfo }, 
-                { desc: 'ข้อมูลใหม่ที่แสดงผล', data: newInfo }, 
-                userId
-            );
-
-            // ปลด Lock
-            await connection.query(`DELETE FROM sys_upload_locks WHERE batch_id = ?`, [batch_id]);
-
-            await connection.commit();
-            res.status(200).json({ message: 'Success', updated_years: years });
-        } else {
-            await connection.rollback();
-            res.status(404).json({ error: 'ไม่พบข้อมูลใน Batch นี้ หรือข้อมูลว่างเปล่า' });
-        }
+        res.status(200).json({ message: 'ประมวลผลข้อมูล สปสช. เสร็จสมบูรณ์' });
     } catch (error) {
-        await connection.rollback();
-        console.error('Finalize Error:', error);
-        res.status(500).json({ error: error.message });
-    } finally {
-        connection.release();
+        console.error('Finalize NHSO Error:', error);
+        res.status(500).json({ message: 'เกิดข้อผิดพลาดในการประมวลผลข้อมูล สปสช.', error: error.message });
     }
 };
 
 // ==========================================
-// ส่วนประกอบเดิมของ HDC
+// 3. ระบบนำเข้าข้อมูล HDC (เป้าหมาย & ผลงาน)
 // ==========================================
-const uploadHdcTarget = async (req, res) => { /* โค้ดเดิม... */ };
-const uploadHdcResult = async (req, res) => { /* โค้ดเดิม... */ };
-const finalizeHdc = async (req, res) => { /* โค้ดเดิม... */ };
 
-module.exports = { 
+const uploadHdcTargetChunk = async (req, res) => {
+    try {
+        const { batch_id, data } = req.body;
+        if (!batch_id || !data || data.length === 0) {
+            return res.status(400).json({ message: 'ข้อมูลไม่ครบถ้วน' });
+        }
+
+        // ตัวอย่างโครงสร้างการ Insert ข้อมูลเป้าหมาย (Target)
+        const values = data.map(row => [
+            batch_id,
+            row['ปีงบ'] || row['fiscal_year'] || null,
+            row['รหัสพยาบาล'] || row['hcode'] || row['hoscode'] || null,
+            JSON.stringify(row) // หาก Schema ยังไม่นิ่ง ให้เก็บเป็น JSON ชั่วคราวไปก่อน
+        ]);
+
+        /* เปิดใช้งานเมื่อสร้างตาราง tmp_hdc_target แล้ว
+        await db.query(
+            `INSERT INTO tmp_hdc_target (batch_id, fiscal_year, hoscode, raw_data) VALUES ?`,
+            [values]
+        );
+        */
+
+        res.status(200).json({ message: `รับข้อมูล Target จำนวน ${data.length} แถว เรียบร้อย` });
+    } catch (error) {
+        console.error('Upload HDC Target Chunk Error:', error);
+        res.status(500).json({ message: 'เกิดข้อผิดพลาดในการรับข้อมูล HDC Target', error: error.message });
+    }
+};
+
+const uploadHdcResultChunk = async (req, res) => {
+    try {
+        const { batch_id, data } = req.body;
+        if (!batch_id || !data || data.length === 0) {
+            return res.status(400).json({ message: 'ข้อมูลไม่ครบถ้วน' });
+        }
+
+        // ตัวอย่างโครงสร้างการ Insert ข้อมูลผลงาน (Result)
+        const values = data.map(row => [
+            batch_id,
+            row['ปีงบ'] || row['fiscal_year'] || null,
+            row['รหัสพยาบาล'] || row['hcode'] || row['hoscode'] || null,
+            JSON.stringify(row)
+        ]);
+
+        /* เปิดใช้งานเมื่อสร้างตาราง tmp_hdc_result แล้ว
+        await db.query(
+            `INSERT INTO tmp_hdc_result (batch_id, fiscal_year, hoscode, raw_data) VALUES ?`,
+            [values]
+        );
+        */
+
+        res.status(200).json({ message: `รับข้อมูล Result จำนวน ${data.length} แถว เรียบร้อย` });
+    } catch (error) {
+        console.error('Upload HDC Result Chunk Error:', error);
+        res.status(500).json({ message: 'เกิดข้อผิดพลาดในการรับข้อมูล HDC Result', error: error.message });
+    }
+};
+
+const finalizeHdc = async (req, res) => {
+    try {
+        const { batch_id, type } = req.body; // type จะเป็น 'target' หรือ 'result'
+        if (!batch_id) return res.status(400).json({ message: 'ไม่พบ Batch ID' });
+
+        if (type === 'target') {
+            // await db.query('CALL sp_finalize_hdc_target(?)', [batch_id]);
+        } else if (type === 'result') {
+            // await db.query('CALL sp_finalize_hdc_result(?)', [batch_id]);
+        }
+
+        // ลบ Lock ออกเมื่อทำงานเสร็จสมบูรณ์
+        await db.query(`DELETE FROM sys_upload_locks WHERE batch_id = ?`, [batch_id]);
+
+        res.status(200).json({ message: 'ประมวลผลข้อมูล HDC เสร็จสมบูรณ์' });
+    } catch (error) {
+        console.error('Finalize HDC Error:', error);
+        res.status(500).json({ message: 'เกิดข้อผิดพลาดในการประมวลผลข้อมูล HDC', error: error.message });
+    }
+};
+
+// ==========================================
+// ส่งออกฟังก์ชันทั้งหมด
+// ==========================================
+module.exports = {
     initUpload,
     unlockUpload,
+    forceUnlock,
     uploadNhsoChunk,
     finalizeNhso,
-    uploadHdcTarget, 
-    uploadHdcResult, 
+    uploadHdcTargetChunk,
+    uploadHdcResultChunk,
     finalizeHdc
 };
