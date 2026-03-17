@@ -20,9 +20,8 @@ const {
 // Routes สำหรับการล็อค/ปลดล็อคระบบ
 // ==========================================
 router.post('/init', verifyToken, initUpload);
-router.post('/unlock', verifyToken, unlockUpload);
+router.post('/unlock', unlockUpload); 
 router.post('/force-unlock', verifyToken, forceUnlock);
-
 // ==========================================
 // Routes สำหรับรับข้อมูล สปสช. (NHSO)
 // ==========================================
